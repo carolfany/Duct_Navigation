@@ -1,0 +1,251 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+import rospy
+import numpy as np
+import math
+from std_msgs.msg import String, Float32, Bool, Float32MultiArray
+from geometry_msgs.msg import Quaternion, Point
+from tf.transformations import euler_matrix, quaternion_matrix, euler_from_matrix
+from sensor_msgs.msg import Imu
+from ros_eposmcd_msgs.msg import Movement
+from ros_eposmcd_msgs.msg import MovementArray
+from geometry_msgs.msg import Twist
+from math import sqrt, acos 
+
+#    (p6)       (p1)             
+#                        ^x            
+#   (p5)         (p2)  y<   
+#                          
+#    (p4)       (p3)             
+
+m = 6
+dx = 0.212 
+dy = 0.33 # distancia p6-p1 e p4-p3          
+dy_m = 0.425 # distancia entre p5 e p2     
+dz = 0.135 # altura do centro de massa        
+fg = 9.8
+
+
+#pi = [px, py, pz] em [metros]
+p1 = np.array([ dx, -(dy/2)  , -dz])
+p2 = np.array([  0, -(dy_m/2), -dz]) #roda do meio
+p3 = np.array([-dx, -(dy/2)  , -dz])  
+p4 = np.array([-dx,  (dy/2)  , -dz]) 
+p5 = np.array([  0,  (dy_m/2), -dz]) #roda do meio
+p6 = np.array([ dx,  (dy/2)  , -dz]) 
+
+
+#Variaveis para valor dos pontos multiplicados pela matriz de rotacao
+p1_l = np.zeros(3)
+p2_l = np.zeros(3)
+p3_l = np.zeros(3)
+p4_l = np.zeros(3)
+p5_l = np.zeros(3)
+p6_l = np.zeros(3)
+p = np.zeros(6) 
+
+a = np.zeros((6, 3))
+quat = np.zeros(4)
+ang_final = np.zeros((6,1))
+r = np.zeros((4,4)) 
+rot_matrix = np.zeros((3,3))              
+l = np.zeros((6,3))
+Y = np.zeros(6)
+sigma = np.zeros(6)
+rpy_angles = Point()
+min_angle = 0
+flag = False
+identidade = np.identity(3)
+
+def modulo(x):
+    mod = 0
+    soma = 0
+    i = len(x)
+    for k in range(i):
+        soma += x[k]*x[k]
+    mod = sqrt(soma)
+    return mod
+        
+def min(x):
+    m = 999999
+    for i in range(len(x)):
+        if x[i]< m:
+            m = x[i]
+    return m
+
+def callback_imu(data):
+    global r, rot_matrix, quat, I, Y, ang_final, fg, identidade, sigma, min_angle, flag, rpy_angles
+    global p1, p2, p3, p4, p5, p6, p1_l, p2_l, p3_l, p4_l, p5_l, p6_l, p_l, a, p
+
+    quat[0] = data.orientation.x
+    quat[1] = data.orientation.y
+    quat[2] = data.orientation.z
+    quat[3] = data.orientation.w
+    r = quaternion_matrix(quat)
+    rot_matrix = r[0:3, 0:3] #corta a matriz de rotacao em 3x3 e armazena em rot_matrix
+    #rot_matrix = np.identity(3) 
+    rpy = euler_from_matrix(r, 'sxyz') #s significa eixos estaticos
+    rpy_angles.x = np.degrees(rpy[0]) #roll em graus
+    rpy_angles.y = np.degrees(rpy[1]) #pitch em graus
+    rpy_angles.z = np.degrees(rpy[2]) #yaw em graus
+
+    #multiplica cada ponto pi(i = 1,2,...,6) pela matriz de rotacao, resultando em pontos pi_l(i = 1,2,...,6):
+    p1_l = np.dot(rot_matrix,p1)
+    p2_l = np.dot(rot_matrix,p2)
+    p3_l = np.dot(rot_matrix,p3)
+    p4_l = np.dot(rot_matrix,p4)
+    p5_l = np.dot(rot_matrix,p5)
+    p6_l = np.dot(rot_matrix,p6)
+
+    p = np.array([p1_l, p2_l, p3_l, p4_l, p5_l, p6_l])
+
+    for i in range(len(a)-1):
+
+        a[i] = p[i+1]-p[i]
+
+    a[5] = p[0]-p[5]
+ 
+    for i in range(len(a)):
+
+        a[i] = a[i]/modulo(a[i])
+    
+    
+    for i in range(len(l)-1):
+
+        l[i] = np.dot((identidade - np.outer(a[i],np.transpose(a[i]))),p[i+1])
+
+    l[5] = np.dot((identidade - np.outer(a[5],np.transpose(a[5]))),p[0])
+    for i in range(len(sigma)):
+            calc = np.dot(np.cross(l[i]/modulo(l[i]),fg/modulo(fg)),a[i])
+            if calc < 0:
+                sigma[i] = 1
+            else:
+                sigma[i] = -1
+    for i in range(len(Y)):
+        
+        Y[i] = sigma[i]*np.arccos(np.dot(fg/modulo(fg), l[i]/modulo(l[i])))
+    ang_final = np.rad2deg(Y)
+    min_angle = min(ang_final)
+
+    if min_angle < 10:
+        flag = True
+    else:
+        flag = False   
+
+def procedure():
+    rospy.init_node('duct_navigation', anonymous=True)
+    rospy.Subscriber("/espeleo/imu_data", Imu, callback_imu)
+    min_pub = rospy.Publisher('/min_angle', Float32, queue_size=10)
+    angles_pub = rospy.Publisher('/angles', Float32MultiArray, queue_size=10)
+    flag_pub = rospy.Publisher('/angle_flag', Bool, queue_size=10)
+    rpy_pub = rospy.Publisher('/imu_rpy', Point, queue_size=10)
+
+
+    cmd_vel = rospy.Subscriber("cmd_vel", Twist, callback_imu)
+    vel_pub = rospy.Publisher("ros_eposmcd/velocity_movement", MovementArray, queue_size=6)
+    r_ = 0.15
+    l_ = 0.30
+    v = 0.5
+    w = 0
+    speed_right = (v/r_ + w*(l_/r_)) * 14.5
+    speed_left = (v/r_ - w*(l_/r_)) * 14.5
+
+    #PID
+    ang_prev_error_0 = 0
+    ang_prev_error_1 = 0
+    ang_prev_error_4 = 0
+    ang_prev_error_5 = 0
+    ang_sum_error_0 = 0
+    ang_sum_error_1 = 0
+    ang_sum_error_4 = 0
+    ang_sum_error_5 = 0
+    setpoint = 0
+    KP = 0.02 #ganho proporcional
+    KD = 0.01 #ganho derivativo
+    KI = 0.005 #ganho integral
+    
+    
+    rate = rospy.Rate(10)
+    while not rospy.is_shutdown():
+	print ("olha entrei aqui")
+
+        a = Float32MultiArray()
+        a.data = ang_final
+        min_pub.publish(min_angle)   
+        angles_pub.publish(a)
+        if flag == True:
+            flag_pub.publish(flag)
+        rpy_pub.publish(rpy_angles)
+
+	print ("ang_final: %s" %ang_final)
+	
+
+	ang_error_4 = setpoint - ang_final[4] #erro da inclinação na roda do meio esquerda
+        ang_error_5 = setpoint - ang_final[5] #erro da inclinação na roda da frente esquerda
+
+	ang_error_0 = setpoint - ang_final[0] #erro da inclinação na roda da frente esquerda
+        ang_error_1 = setpoint - ang_final[1] #erro da inclinação na roda do meio esquerda
+	
+	if (ang_error_4 < 0) and (ang_error_5 < 0): # se inclinação no lado esquerdo
+
+	    error_left = max(abs(ang_error_4), abs(ang_error_5))
+	    prev_error_left = max(abs(ang_prev_error_4), abs(ang_prev_error_5))
+	    sum_error_left = max(abs(ang_sum_error_4), abs(ang_sum_error_5))
+	    
+	    w += (error_left * KP) + (prev_error_left * KD) + (sum_error_left * KI)
+	    
+            speed_right = (v/r_ + w*(l_/r_)) * 14.5
+            speed_left = (v/r_ - w*(l_/r_)) * 14.5
+	    print ("O:::::::")
+	
+	
+	if (ang_error_0 < 0) and (ang_error_1 < 0): # se inclinação no lado direito
+
+	    error_right = max(abs(ang_error_0), abs(ang_error_1))
+	    prev_error_right = max(abs(ang_prev_error_0), abs(ang_prev_error_1))
+	    sum_error_right = max(abs(ang_sum_error_0), abs(ang_sum_error_1))
+
+	    w += (error_right * KP) + (prev_error_right * KD) + (sum_error_right * KI)
+	    
+            speed_right = (v/r_ + w*(l_/r_)) * 14.5
+            speed_left = (v/r_ - w*(l_/r_)) * 14.5
+	    print ("OO:::::::")
+	
+        messageArray = MovementArray()
+
+        messageArray.movement_command.append(Movement(nodeID=1, velocity=speed_left))
+        messageArray.movement_command.append(Movement(nodeID=2, velocity=speed_left))
+        messageArray.movement_command.append(Movement(nodeID=3, velocity=speed_left))
+    	messageArray.movement_command.append(Movement(nodeID=4, velocity=speed_right))
+    	messageArray.movement_command.append(Movement(nodeID=5, velocity=speed_right))
+    	messageArray.movement_command.append(Movement(nodeID=6, velocity=speed_right))        
+
+	vel_pub.publish(messageArray)
+	print ("messageArray: %s" %messageArray)
+	
+	ang_prev_error_0 = ang_error_0
+	ang_prev_error_1 = ang_error_1
+	ang_prev_error_4 = ang_error_4
+	ang_prev_error_5 = ang_error_5
+
+	ang_sum_error_0 += ang_error_0
+	ang_sum_error_1 += ang_error_1
+	ang_sum_error_4 += ang_error_4
+	ang_sum_error_5 += ang_error_5
+
+	rate.sleep()
+
+def listener():
+    rospy.init_node('espeleo_locomotion_wheels', anonymous=True)
+
+    rospy.Subscriber("cmd_vel", Twist, callback)
+
+    rospy.spin()          
+
+if __name__ == '__main__':
+    try:
+	print ("pelo menos isso")
+        procedure()
+    except rospy.ROSInterruptException:
+        pass
