@@ -168,7 +168,7 @@ def procedure():
     
     rate = rospy.Rate(10)
     while not rospy.is_shutdown():
-	print ("olha entrei aqui")
+
 
         a = Float32MultiArray()
         a.data = ang_final
@@ -197,7 +197,7 @@ def procedure():
 	    
             speed_right = (v/r_ + w*(l_/r_)) * 14.5
             speed_left = (v/r_ - w*(l_/r_)) * 14.5
-	    print ("O:::::::")
+	
 	
 	
 	if (ang_error_0 < 0) and (ang_error_1 < 0): # se inclinação no lado direito
@@ -210,7 +210,7 @@ def procedure():
 	    
             speed_right = (v/r_ + w*(l_/r_)) * 14.5
             speed_left = (v/r_ - w*(l_/r_)) * 14.5
-	    print ("OO:::::::")
+	  
 	
         messageArray = MovementArray()
 
@@ -245,7 +245,7 @@ def listener():
 
 if __name__ == '__main__':
     try:
-	print ("pelo menos isso")
+	
         procedure()
     except rospy.ROSInterruptException:
         pass
